@@ -1,0 +1,83 @@
+# Bare-Metal-UART auf STM32F411 (ohne HAL)
+
+Ein UART-Sendetreiber auf Registerebene für das STM32 Nucleo-F411RE, komplett von
+Grund auf geschrieben — ohne STM32-HAL, ohne von CubeMX generierten Code, ohne
+Bibliotheken außer `<stdint.h>`. Jede Peripherie wird direkt über
+speicherabgebildete Hardware-Register konfiguriert, wobei die Register-Layouts von
+Hand als C-Structs nachgebildet wurden.
+
+Dies ist Teil eines selbstgesteuerten Embedded-Systems-Lehrplans, in dem ich die
+Hardware bewusst von Grund auf lerne, anstatt mit Abstraktionen zu beginnen.
+
+## Was es macht
+
+Beim Start konfiguriert das Board USART2 und sendet fortlaufend das Zeichen `'A'`
+über den virtuellen COM-Port des ST-Link. Öffnet man ein serielles Terminal mit
+**115200 Baud**, erscheint ein kontinuierlicher Strom von `A`s — der erste Kanal
+des Boards, um echte Daten an einen Host zu senden, über eine einzelne LED hinaus.
+
+## Warum Bare-Metal
+
+Die meisten STM32-Tutorials rufen `HAL_UART_Transmit()` auf und erklären nie, was
+darunter passiert. Ich wollte die eigentliche Maschine verstehen: was ein Register
+ist, wie eine Peripherie adressiert wird und warum jeder Konfigurationsschritt
+notwendig ist. Statt ST's Header zu verwenden, habe ich:
+
+- Die Register-Layouts von `RCC`, `GPIO` und `USART` als C-Structs nachgebildet und
+  den Offset jedes Feldes aus dem STM32F411-Referenzhandbuch (RM0383) hergeleitet.
+- Das Modell „Basisadresse plus Offset“ direkt genutzt, sodass `USART2->BRR` auf
+  eine bekannte physische Adresse (`0x40004400 + 0x08`) ohne Magie auflöst.
+- Das Problem der „reservierten Lücken“ gelöst — Structs mit Platzhalter-Arrays
+  aufgefüllt, damit benannte Register an ihren echten Offsets liegen (z. B.
+  `AHB1ENR` bei `0x30`, `APB1ENR` bei `0x40`).
+
+## Wie die UART in Betrieb genommen wird
+
+Die Einrichtung folgt der üblichen Reihenfolge zur Inbetriebnahme einer Peripherie:
+
+1. **Takte aktivieren.** GPIOA am AHB1-Bus, USART2 am langsameren APB1-Bus — zwei
+   verschiedene Enable-Register, da die Peripherien an unterschiedlichen Bussen
+   hängen.
+2. **Den TX-Pin konfigurieren.** PA2 ist fest mit der TX-Leitung von USART2
+   verdrahtet. Er wird in den *Alternate-Function*-Modus gesetzt (die Pin-Steuerung
+   wird von der CPU an die UART-Peripherie übergeben) und über das AFR-Register der
+   Alternate Function 7 zugewiesen.
+3. **Die Baudrate setzen.** `BRR = Takt / Baud = 16.000.000 / 115200 ≈ 139`. Das
+   Register enthält den Teiler, der den Peripherietakt auf die Bitrate herunterteilt.
+4. **Sender und USART aktivieren** (die Bits `TE` und `UE` in `CR1`).
+5. **Senden.** Für jedes Byte wird das Status-Flag `TXE` (Sende-Register leer)
+   abgefragt und gewartet, bis die Hardware bereit ist, dann wird das Byte in das
+   Datenregister geschrieben.
+
+## Demonstrierte Kernkonzepte
+
+- Speicherabgebildete Ein-/Ausgabe (Memory-Mapped I/O) und `volatile`-Registerzugriff
+- Lesen eines Hardware-Referenzhandbuchs, um Registeradressen und Bitfelder zu finden
+- Struct-über-Speicher als Mechanismus hinter der `PERIPH->REGISTER`-Syntax
+- Bitweise Registermanipulation: Setzen, Löschen und Schreiben mehrbittiger Felder
+  mit Masken
+- Takt-Gating der Peripherie über mehrere Busse (AHB1 / APB1)
+- Alternate-Function-Pin-Multiplexing
+- Abfragen von Status-Flags (das blockierende Muster `while (!(SR & TXE));`)
+
+## Hardware
+
+- **Board:** STM32 Nucleo-F411RE (STM32F411RET6, ARM Cortex-M4)
+- **Referenz:** RM0383 (STM32F411-Referenzhandbuch), UM1724 (Nucleo-Benutzerhandbuch)
+- **Toolchain:** VS Code mit der STM32Cube-Erweiterung; ARM GCC; ST-Link zum Flashen
+
+## Bauen & Ausführen
+
+1. Das Projekt in VS Code mit installierter STM32Cube-Erweiterung öffnen.
+2. Konfigurieren und bauen (CMake), dann über ST-Link auf das Nucleo flashen.
+3. Einen seriellen Monitor am virtuellen COM-Port des ST-Link mit **115200 Baud**
+   öffnen.
+4. Ein kontinuierlicher Strom von `A`-Zeichen bestätigt, dass der Sendepfad
+   funktioniert.
+
+## Ausblick
+
+Dieser UART-Treiber ist ein Zwischenschritt. Er dient dazu, einen Debug-Ausgabekanal
+für die nächste Stufe bereitzustellen: das Auslesen eines echten Sensors (eine
+MPU6050-IMU) über I²C und das Streamen seiner Bewegungsdaten zurück über dieselbe
+serielle Verbindung.
